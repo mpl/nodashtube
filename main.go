@@ -83,11 +83,10 @@ var (
 
 	inProgressMu sync.RWMutex
 	inProgress   = make(map[string]*dlInfo)
+	lastMod      time.Time
 
 	storedMu sync.RWMutex
 	stored   []string
-
-	lastMod time.Time
 
 	tpl = template.Must(template.New("main").Parse(indexHTML))
 )
@@ -107,7 +106,7 @@ func main() {
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Fatalf("Could not create temp dir %v: %v", tempDir, err)
 	}
-	refreshStored(time.Now())
+	refreshStored(time.Time{})
 
 	http.HandleFunc(youtubePrefix, youtubeHandler)
 	http.HandleFunc(killPrefix, killHandler)
@@ -136,43 +135,47 @@ func refreshStored(since time.Time) bool {
 
 	// The Date-Modified header truncates sub-second precision, so
 	// use mtime < t+1s instead of mtime <= t to check for unmodified.
-	if d.ModTime().Before(since.Add(1 * time.Second)) {
+	if d.ModTime().After(since) {
 		storedMu.Lock()
 		defer storedMu.Unlock()
 		stored, err = sortedStored(f)
 		if err != nil {
 			log.Fatal(err)
 		}
-		if lastMod.Before(d.ModTime()) {
-			lastMod = d.ModTime()
-		}
 		return true
 	}
 	return false
 }
 
-// TODO(mpl): move in above
 func sortedStored(f *os.File) ([]string, error) {
-	// TODO(mpl): filter with .part?
 	names, err := f.Readdirnames(-1)
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(names)
-	return names, nil
+	onlyFull := []string{}
+	for _, v := range names {
+		if !strings.HasSuffix(v, ".part") {
+			onlyFull = append(onlyFull, v)
+		}
+	}
+	sort.Strings(onlyFull)
+	return onlyFull, nil
 }
 
 func refresh(w http.ResponseWriter, r *http.Request) {
 	ifMod, err := time.Parse(http.TimeFormat, r.Header.Get("If-Modified-Since"))
 	if err != nil {
-		ifMod = time.Now()
+		ifMod = time.Time{}
 	}
 	refreshed := refreshStored(ifMod)
 	if !refreshed && lastMod.Before(ifMod) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+	// TODO(mpl): that's not perfectly correct, because lastMod concerns
+	// inProgress, not the stored files.
 	w.Header().Set("Last-Modified", lastMod.UTC().Format(http.TimeFormat))
+	inProgressMu.RLock()
 	storedMu.RLock()
 	dat := struct {
 		InProgress map[string]*dlInfo
@@ -182,14 +185,13 @@ func refresh(w http.ResponseWriter, r *http.Request) {
 		Stored:     stored,
 	}
 	storedMu.RUnlock()
+	inProgressMu.RUnlock()
 	if err := tpl.Execute(w, &dat); err != nil {
 		log.Printf("Could not execute template: %v", err)
 	}
 }
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
-	inProgressMu.RLock()
-	defer inProgressMu.RUnlock()
 	refresh(w, r)
 }
 
@@ -201,21 +203,21 @@ type dlInfo struct {
 }
 
 func youtubeHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO(mpl): reset urlpath
 	if r.Method != "POST" {
 		http.Error(w, "Want POST", http.StatusMethodNotAllowed)
-		mainHandler(w, r)
 		return
 	}
+	// TODO(mpl): is there a lighter way to do that? I just want
+	// the url bar path to be changed to "/".
+	// Also, not just "/", but give the choice for a prefix for the whole app.
+	defer http.Redirect(w, r, "/", http.StatusSeeOther)
 	youtubeURL := r.PostFormValue(urlInputName)
 	if youtubeURL == "" {
 		mainHandler(w, r)
 		return
 	}
-	println(youtubeURL)
 	inProgressMu.Lock()
 	defer inProgressMu.Unlock()
-	defer refresh(w, r)
 	if _, ok := inProgress[youtubeURL]; ok {
 		log.Printf("Not starting %v because it is already in progress", youtubeURL)
 		return
@@ -232,6 +234,7 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("youtube-dl %v didn't finish successfully: %v", youtubeURL, err)
+			return
 		}
 		inProgressMu.Lock()
 		delete(inProgress, youtubeURL)
@@ -243,23 +246,21 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		progress: "Started",
 		proc:     cmd.Process,
 	}
+	lastMod = time.Now()
 }
 
 func killHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO(mpl): reset urlpath
 	if r.Method != "POST" {
 		http.Error(w, "Want POST", http.StatusMethodNotAllowed)
-		mainHandler(w, r)
 		return
 	}
+	defer http.Redirect(w, r, "/", http.StatusSeeOther)
 	toKill := r.PostFormValue(killInputName)
 	if toKill == "" {
-		mainHandler(w, r)
 		return
 	}
 	inProgressMu.Lock()
 	defer inProgressMu.Unlock()
-	defer refresh(w, r)
 	dl, ok := inProgress[toKill]
 	if !ok {
 		log.Printf("Could not cancel %v, because not in progress.", toKill)
@@ -270,6 +271,7 @@ func killHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(inProgress, toKill)
+	lastMod = time.Now()
 }
 
 func isStored(name string) bool {
@@ -305,6 +307,7 @@ var indexHTML = `
 	</head>
 
 	<body>
+	<h2> Enter a youtube URL </h2>
 	<form action="` + youtubePrefix + `" method="POST" id="youtubeform">
 	<input type="url" id="youtubeurl" name="` + urlInputName + `">
 	<input type="submit" id="urlsubmit" value="Download">
