@@ -60,76 +60,6 @@ func sortedDirList(w http.ResponseWriter, f http.File) {
 	fmt.Fprintf(w, "</pre>\n")
 }
 
-// modtime is the modification time of the resource to be served, or IsZero().
-// return value is whether this request is now complete.
-func checkLastModified(w http.ResponseWriter, r *http.Request, modtime time.Time) bool {
-	if modtime.IsZero() {
-		return false
-	}
-
-	// The Date-Modified header truncates sub-second precision, so
-	// use mtime < t+1s instead of mtime <= t to check for unmodified.
-	if t, err := time.Parse(http.TimeFormat, r.Header.Get("If-Modified-Since")); err == nil && modtime.Before(t.Add(1*time.Second)) {
-		w.WriteHeader(http.StatusNotModified)
-		return true
-	}
-	w.Header().Set("Last-Modified", modtime.UTC().Format(http.TimeFormat))
-	return false
-}
-
-// name is '/'-separated, not filepath.Separator.
-func serveFile(w http.ResponseWriter, r *http.Request, fs http.FileSystem, name string) {
-	const indexPage = "/index.html"
-
-	f, err := fs.Open(name)
-	if err != nil {
-		// TODO expose actual error?
-		http.NotFound(w, r)
-		return
-	}
-	defer f.Close()
-
-	d, err1 := f.Stat()
-	if err1 != nil {
-		// TODO expose actual error?
-		http.NotFound(w, r)
-		return
-	}
-
-	// use contents of index.html for directory, if present
-	if d.IsDir() {
-		index := name + indexPage
-		ff, err := fs.Open(index)
-		if err == nil {
-			defer ff.Close()
-			dd, err := ff.Stat()
-			if err == nil {
-				name = index
-				d = dd
-				f = ff
-			}
-		}
-	}
-
-	// Still a directory? (we didn't find an index.html file)
-	if d.IsDir() {
-		if checkLastModified(w, r, d.ModTime()) {
-			return
-		}
-		sortedDirList(w, f)
-		return
-	}
-
-	// serverContent will check modification time
-	http.ServeContent(w, r, d.Name(), d.ModTime(), f)
-}
-
-func myFileServer(w http.ResponseWriter, r *http.Request, url string) {
-	//	http.ServeFile(w, r, path.Join(rootdir, url))
-	dir, file := filepath.Split(filepath.Join("ROOTDIR", url))
-	serveFile(w, r, http.Dir(dir), file)
-}
-
 func usage() {
 	fmt.Fprintf(os.Stderr, "\t nodashtube \n")
 	flag.PrintDefaults()
@@ -139,10 +69,12 @@ func usage() {
 var (
 	urlInputName  = "youtubeURL"
 	killInputName = "toKill"
+
 	youtubePrefix = "/youtube"
 	killPrefix    = "/kill"
-	tpl           = template.Must(template.New("main").Parse(indexHTML))
-	tempDir       = func() string {
+	storedPrefix  = "/stored/"
+
+	tempDir = func() string {
 		if *dlDir == "" {
 			return filepath.Join(os.TempDir(), "nodashtube")
 		}
@@ -151,6 +83,13 @@ var (
 
 	inProgressMu sync.RWMutex
 	inProgress   = make(map[string]*dlInfo)
+
+	storedMu sync.RWMutex
+	stored   []string
+
+	lastMod time.Time
+
+	tpl = template.Must(template.New("main").Parse(indexHTML))
 )
 
 func main() {
@@ -168,22 +107,90 @@ func main() {
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Fatalf("Could not create temp dir %v: %v", tempDir, err)
 	}
+	refreshStored(time.Now())
 
+	http.HandleFunc(youtubePrefix, youtubeHandler)
+	http.HandleFunc(killPrefix, killHandler)
+	http.HandleFunc(storedPrefix, storedHandler)
 	http.HandleFunc("/", mainHandler)
-	http.HandleFunc("/youtube", youtubeHandler)
-	http.HandleFunc("/kill", killHandler)
 	if err := http.ListenAndServe(*host, nil); err != nil {
 		log.Fatalf("Could not start http server: %v", err)
+	}
+}
+
+func refreshStored(since time.Time) bool {
+	f, err := os.Open(tempDir)
+	if err != nil {
+		log.Fatalf("Could not open temp dir %v: %v", tempDir, err)
+	}
+	defer f.Close()
+
+	d, err := f.Stat()
+	if err != nil {
+		log.Fatalf("Could not stat temp dir %v: %v", tempDir, err)
+	}
+
+	if !d.IsDir() {
+		log.Fatalf("%v not a dir", tempDir)
+	}
+
+	// The Date-Modified header truncates sub-second precision, so
+	// use mtime < t+1s instead of mtime <= t to check for unmodified.
+	if d.ModTime().Before(since.Add(1 * time.Second)) {
+		storedMu.Lock()
+		defer storedMu.Unlock()
+		stored, err = sortedStored(f)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if lastMod.Before(d.ModTime()) {
+			lastMod = d.ModTime()
+		}
+		return true
+	}
+	return false
+}
+
+// TODO(mpl): move in above
+func sortedStored(f *os.File) ([]string, error) {
+	// TODO(mpl): filter with .part?
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func refresh(w http.ResponseWriter, r *http.Request) {
+	ifMod, err := time.Parse(http.TimeFormat, r.Header.Get("If-Modified-Since"))
+	if err != nil {
+		ifMod = time.Now()
+	}
+	refreshed := refreshStored(ifMod)
+	if !refreshed && lastMod.Before(ifMod) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Last-Modified", lastMod.UTC().Format(http.TimeFormat))
+	storedMu.RLock()
+	dat := struct {
+		InProgress map[string]*dlInfo
+		Stored     []string
+	}{
+		InProgress: inProgress,
+		Stored:     stored,
+	}
+	storedMu.RUnlock()
+	if err := tpl.Execute(w, &dat); err != nil {
+		log.Printf("Could not execute template: %v", err)
 	}
 }
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 	inProgressMu.RLock()
 	defer inProgressMu.RUnlock()
-	dat := struct{ InProgress map[string]*dlInfo }{InProgress: inProgress}
-	if err := tpl.Execute(w, &dat); err != nil {
-		log.Printf("Could not execute template: %v", err)
-	}
+	refresh(w, r)
 }
 
 // TODO(mpl): make it a stringer and remove progress out of it?
@@ -194,27 +201,31 @@ type dlInfo struct {
 }
 
 func youtubeHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO(mpl): reset urlpath
 	if r.Method != "POST" {
 		http.Error(w, "Want POST", http.StatusMethodNotAllowed)
+		mainHandler(w, r)
 		return
 	}
 	youtubeURL := r.PostFormValue(urlInputName)
 	if youtubeURL == "" {
+		mainHandler(w, r)
 		return
 	}
 	println(youtubeURL)
 	inProgressMu.Lock()
 	defer inProgressMu.Unlock()
+	defer refresh(w, r)
 	if _, ok := inProgress[youtubeURL]; ok {
 		log.Printf("Not starting %v because it is already in progress", youtubeURL)
 		return
 	}
 
-	cmd := exec.Command("youtube-dl", youtubeURL)
+	//	cmd := exec.Command("youtube-dl", youtubeURL)
+	cmd := exec.Command("wget", youtubeURL)
 	cmd.Dir = tempDir
 	if err := cmd.Start(); err != nil {
 		log.Printf("Could not start youtube-dl with %v: %v", youtubeURL, err)
-		// TODO(mpl): refresh. everywhere.
 		return
 	}
 	log.Printf("Starting download of %v", youtubeURL)
@@ -222,29 +233,33 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("youtube-dl %v didn't finish successfully: %v", youtubeURL, err)
 		}
+		inProgressMu.Lock()
+		delete(inProgress, youtubeURL)
+		inProgressMu.Unlock()
+		lastMod = time.Now()
 	}()
 	inProgress[youtubeURL] = &dlInfo{
 		URL:      youtubeURL,
 		progress: "Started",
 		proc:     cmd.Process,
 	}
-	dat := struct{ InProgress map[string]*dlInfo }{InProgress: inProgress}
-	if err := tpl.Execute(w, &dat); err != nil {
-		log.Printf("Could not execute template: %v", err)
-	}
 }
 
 func killHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO(mpl): reset urlpath
 	if r.Method != "POST" {
 		http.Error(w, "Want POST", http.StatusMethodNotAllowed)
+		mainHandler(w, r)
 		return
 	}
 	toKill := r.PostFormValue(killInputName)
 	if toKill == "" {
+		mainHandler(w, r)
 		return
 	}
 	inProgressMu.Lock()
 	defer inProgressMu.Unlock()
+	defer refresh(w, r)
 	dl, ok := inProgress[toKill]
 	if !ok {
 		log.Printf("Could not cancel %v, because not in progress.", toKill)
@@ -255,10 +270,31 @@ func killHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(inProgress, toKill)
-	dat := struct{ InProgress map[string]*dlInfo }{InProgress: inProgress}
-	if err := tpl.Execute(w, &dat); err != nil {
-		log.Printf("Could not execute template: %v", err)
+}
+
+func isStored(name string) bool {
+	for _, v := range stored {
+		if v == name {
+			return true
+		}
 	}
+	return false
+}
+
+func storedHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Want GET", http.StatusMethodNotAllowed)
+		mainHandler(w, r)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, storedPrefix)
+	println("WANT " + name)
+	storedMu.RLock()
+	defer storedMu.RUnlock()
+	if !isStored(name) {
+		http.NotFound(w, r)
+	}
+	http.ServeFile(w, r, filepath.Join(tempDir, name))
 }
 
 var indexHTML = `
@@ -285,6 +321,16 @@ var indexHTML = `
 			<input type="submit" id="killsubmit" value="Cancel">
 			</form>
 		</td>
+	</tr>
+	{{end}}
+	</table>
+	{{end}}
+	{{if .Stored}}
+	<h2> Stored </h2>
+	<table>
+	{{range $st := .Stored}}
+	<tr>
+		<td><a href="` + storedPrefix + `{{$st}}">{{$st}}</a></td>
 	</tr>
 	{{end}}
 	</table>
