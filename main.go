@@ -83,10 +83,10 @@ var (
 
 	inProgressMu sync.RWMutex
 	inProgress   = make(map[string]*dlInfo)
-	lastMod      time.Time
 
 	storedMu sync.RWMutex
 	stored   []string
+	lastMod  time.Time
 
 	tpl = template.Must(template.New("main").Parse(indexHTML))
 )
@@ -136,12 +136,11 @@ func refreshStored(since time.Time) bool {
 	// The Date-Modified header truncates sub-second precision, so
 	// use mtime < t+1s instead of mtime <= t to check for unmodified.
 	if d.ModTime().After(since) {
-		storedMu.Lock()
-		defer storedMu.Unlock()
 		stored, err = sortedStored(f)
 		if err != nil {
 			log.Fatal(err)
 		}
+		lastMod = d.ModTime()
 		return true
 	}
 	return false
@@ -167,16 +166,17 @@ func refresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		ifMod = time.Time{}
 	}
+
+	storedMu.Lock()
+	defer storedMu.Unlock()
 	refreshed := refreshStored(ifMod)
-	if !refreshed && lastMod.Before(ifMod) {
+	inProgressMu.RLock()
+	defer inProgressMu.RUnlock()
+	if len(inProgress) == 0 && !refreshed {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	// TODO(mpl): that's not perfectly correct, because lastMod concerns
-	// inProgress, not the stored files.
 	w.Header().Set("Last-Modified", lastMod.UTC().Format(http.TimeFormat))
-	inProgressMu.RLock()
-	storedMu.RLock()
 	dat := struct {
 		InProgress map[string]*dlInfo
 		Stored     []string
@@ -184,8 +184,6 @@ func refresh(w http.ResponseWriter, r *http.Request) {
 		InProgress: inProgress,
 		Stored:     stored,
 	}
-	storedMu.RUnlock()
-	inProgressMu.RUnlock()
 	if err := tpl.Execute(w, &dat); err != nil {
 		log.Printf("Could not execute template: %v", err)
 	}
@@ -223,8 +221,8 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//	cmd := exec.Command("youtube-dl", youtubeURL)
-	cmd := exec.Command("wget", youtubeURL)
+	cmd := exec.Command("youtube-dl", youtubeURL)
+	//	cmd := exec.Command("wget", youtubeURL)
 	cmd.Dir = tempDir
 	if err := cmd.Start(); err != nil {
 		log.Printf("Could not start youtube-dl with %v: %v", youtubeURL, err)
@@ -239,14 +237,12 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		inProgressMu.Lock()
 		delete(inProgress, youtubeURL)
 		inProgressMu.Unlock()
-		lastMod = time.Now()
 	}()
 	inProgress[youtubeURL] = &dlInfo{
 		URL:      youtubeURL,
 		progress: "Started",
 		proc:     cmd.Process,
 	}
-	lastMod = time.Now()
 }
 
 func killHandler(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +267,6 @@ func killHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(inProgress, toKill)
-	lastMod = time.Now()
 }
 
 func isStored(name string) bool {
