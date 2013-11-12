@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"html/template"
@@ -196,8 +197,43 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 // TODO(mpl): make it a stringer and remove progress out of it?
 type dlInfo struct {
 	URL      string
-	progress string      // get it with a chan from the proc output. or something.
-	proc     *os.Process // so we can kill it
+	Progress *progressWriter // get it with a chan from the proc output. or something.
+	proc     *os.Process     // so we can kill it
+}
+
+type progressWriter struct {
+	sync.RWMutex
+	lastLine string
+	buf      bytes.Buffer
+}
+
+func (prw *progressWriter) Write(p []byte) (n int, err error) {
+	prw.Lock()
+	defer prw.Unlock()
+	n, err = prw.buf.Write(p)
+	if err != nil {
+		return n, err
+	}
+	contents := prw.buf.String()
+	if len(contents) > 0 {
+		cleanEnd := strings.LastIndex(contents, "\n")
+		if cleanEnd == -1 {
+			return n, err
+		}
+		cleanStart := strings.LastIndex(contents[:cleanEnd], "\n")
+		if cleanStart == -1 {
+			cleanStart = 0
+		}
+		prw.lastLine = contents[cleanStart:cleanEnd]
+		prw.buf.Read(make([]byte, cleanEnd+1))
+	}
+	return n, err
+}
+
+func (prw *progressWriter) String() string {
+	prw.RLock()
+	defer prw.RUnlock()
+	return prw.lastLine
 }
 
 func youtubeHandler(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +258,8 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := exec.Command("youtube-dl", youtubeURL)
+	out := progressWriter{}
+	cmd.Stdout = &out
 	//	cmd := exec.Command("wget", youtubeURL)
 	cmd.Dir = tempDir
 	if err := cmd.Start(); err != nil {
@@ -240,7 +278,7 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 	inProgress[youtubeURL] = &dlInfo{
 		URL:      youtubeURL,
-		progress: "Started",
+		Progress: &out,
 		proc:     cmd.Process,
 	}
 }
@@ -285,7 +323,6 @@ func storedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, storedPrefix)
-	println("WANT " + name)
 	storedMu.RLock()
 	defer storedMu.RUnlock()
 	if !isStored(name) {
@@ -313,6 +350,7 @@ var indexHTML = `
 	{{range $dl := .InProgress}}
 	<tr>
 		<td>{{$dl.URL}}</td>
+		<td>{{$dl.Progress}}</td>
 		<td>
 			<form action="` + killPrefix + `" method="POST" id="killform">
 			<input type="hidden" id="killurl" name="` + killInputName + `" value="{{$dl.URL}}">
