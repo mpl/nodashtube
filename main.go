@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
@@ -12,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +24,9 @@ const (
 )
 
 var (
-	dlDir  = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
-	help   = flag.Bool("h", false, "show this help.")
-	host   = flag.String("host", "0.0.0.0:8080", "listening port and hostname.")
+	dlDir = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
+	help  = flag.Bool("h", false, "show this help.")
+	host  = flag.String("host", "0.0.0.0:8080", "listening port and hostname.")
 	prefix = flag.String("prefix", "", "URL prefix for which the server runs (as in http://foo:8080/prefix).")
 )
 
@@ -38,11 +40,13 @@ var (
 	urlInputName  = "youtubeURL"
 	killInputName = "toKill"
 
-	prefixes = map[string]string{
-		"main":    "/",
+	prefixes = map[string]string {
+		"main": "/",
 		"youtube": "/youtube",
-		"kill":    "/kill",
-		"stored":  "/stored/",
+		"kill": "/kill",
+		"stored": "/stored/",
+		"progress": "/progress",
+		"notify": "/notify.js",
 	}
 
 	tempDir string
@@ -71,12 +75,12 @@ func main() {
 
 	// these have to be redefined now because of *prefix flag
 	// that is set after glob vars have been initialized.
-	for k, v := range prefixes {
+	for k, v := range prefixes{
 		prefixes[k] = path.Join(*prefix, v)
 	}
 	// TODO(mpl): sucks
 	prefixes["stored"] = prefixes["stored"] + "/"
-
+	
 	tpl = template.Must(template.New("main").Parse(mainHTML()))
 	tempDir = func() string {
 		if *dlDir == "" {
@@ -84,15 +88,21 @@ func main() {
 		}
 		return *dlDir
 	}()
-
+		
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Fatalf("Could not create temp dir %v: %v", tempDir, err)
 	}
 	refreshStored(time.Time{})
 
+	// TODO(mpl): favicon.ico
 	http.HandleFunc(prefixes["youtube"], youtubeHandler)
 	http.HandleFunc(prefixes["kill"], killHandler)
 	http.HandleFunc(prefixes["stored"], storedHandler)
+	http.HandleFunc(prefixes["progress"], progressHandler)
+	// TODO(mpl): embed instead
+	http.HandleFunc(prefixes["notify"], func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "/home/mpl/gocode/src/github.com/mpl/nodashtube/notify.js")
+	})
 	http.HandleFunc(prefixes["main"], mainHandler)
 	if err := http.ListenAndServe(*host, nil); err != nil {
 		log.Fatalf("Could not start http server: %v", err)
@@ -100,7 +110,6 @@ func main() {
 }
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO(mpl): remove that check?
 	if r.URL.Path != prefixes["main"] {
 		println(r.URL.Path + " != " + prefixes["main"])
 		http.NotFound(w, r)
@@ -195,7 +204,28 @@ func storedHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(tempDir, name))
 }
 
+func progressHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Want GET", http.StatusMethodNotAllowed)
+		return
+	}
+	inProgressMu.RLock()
+	defer inProgressMu.RUnlock()
+	progressJSON, err := json.Marshal(inProgress)
+	if err != nil {
+		// TODO(mpl): json error
+		http.Error(w, "Error encoding progress", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/javascript")
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Length", strconv.Itoa(len(progressJSON)+1))
+	w.Write(progressJSON)
+	w.Write([]byte("\n"))
+}
+
 func refresh(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Server", idstring)
 	ifMod, err := time.Parse(http.TimeFormat, r.Header.Get("If-Modified-Since"))
 	if err != nil {
 		ifMod = time.Time{}
@@ -265,17 +295,21 @@ func sortedStored(f *os.File) ([]string, error) {
 	return onlyFull, nil
 }
 
+// TODO(mpl): this works well for the template, but not for the js because it doesn't
+// give progress. I don't actually need the progress for the js notifications though.
+// still it'd be nice to have a data struct which works directly for both without any
+// massageing needed.
 type dlInfo struct {
 	URL      string
-	Progress *progressWriter // get it with a chan from the proc output. or something.
-	proc     *os.Process     // so we can kill it
+	Progress *progressWriter
+	proc     *os.Process // so we can kill it
 }
 
 // TODO(mpl): this means reads will block youtube-dl if it blocks on writes. We'll see.
 type progressWriter struct {
 	sync.RWMutex
 	lastLine string
-	buf      bytes.Buffer
+	buf bytes.Buffer
 }
 
 func (prw *progressWriter) Write(p []byte) (n int, err error) {
@@ -316,11 +350,13 @@ func isStored(name string) bool {
 	return false
 }
 
+// TODO(mpl): button to show .part
 func mainHTML() string {
 	return `<!DOCTYPE HTML>
 <html>
 	<head>
 		<title>NoDashTube</title>
+		<script src='notify.js'></script>
 	</head>
 
 	<body>
@@ -362,3 +398,51 @@ func mainHTML() string {
 </html>
 `
 }
+
+/*
+function notify() {
+  var havePermission = window.webkitNotifications.checkPermission();
+  if (havePermission == 0) {
+    // 0 is PERMISSION_ALLOWED
+    var notification = window.webkitNotifications.createNotification(
+      'http://i.stack.imgur.com/dmHl0.png',
+      'Chrome notification!',
+      'Here is the notification text'
+    );
+
+    notification.onclick = function () {
+      window.open("http://stackoverflow.com/a/13328397/1269037");
+      notification.close();
+    }
+    notification.show();
+  } else {
+      window.webkitNotifications.requestPermission();
+  }
+} 
+
+function getProgressList(URL) {
+	var xmlhttp = new XMLHttpRequest();
+	xmlhttp.open("GET",URL,false);
+	xmlhttp.send();
+	console.log(xmlhttp.responseText);
+	var newListJSON = xmlhttp.response;
+	var newList = Object.keys(JSON.parse(newListJSON));
+	console.log(newList.length);
+	console.log(newList);
+	if (currentList.length == 0) {
+		currentList = newList;
+		return;
+	}
+	for (var URL in currentList) {
+		if (!(URL in newList)) {
+			console.log(URL + " is done.")
+		}
+	}
+	currentList = newList;
+}
+
+var currentList = [];
+var progressHost = "http://localhost:8080/progress";
+setInterval(function(){getProgressList(progressHost)},5000);
+
+*/
