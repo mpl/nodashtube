@@ -24,9 +24,9 @@ const (
 )
 
 var (
-	dlDir = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
-	help  = flag.Bool("h", false, "show this help.")
-	host  = flag.String("host", "0.0.0.0:8080", "listening port and hostname.")
+	dlDir  = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
+	help   = flag.Bool("h", false, "show this help.")
+	host   = flag.String("host", "0.0.0.0:8080", "listening port and hostname.")
 	prefix = flag.String("prefix", "", "URL prefix for which the server runs (as in http://foo:8080/prefix).")
 )
 
@@ -40,13 +40,13 @@ var (
 	urlInputName  = "youtubeURL"
 	killInputName = "toKill"
 
-	prefixes = map[string]string {
-		"main": "/",
-		"youtube": "/youtube",
-		"kill": "/kill",
-		"stored": "/stored/",
+	prefixes = map[string]string{
+		"main":     "/",
+		"youtube":  "/youtube",
+		"kill":     "/kill",
+		"stored":   "/stored/",
 		"progress": "/progress",
-		"notify": "/notify.js",
+		"notify":   "/notify.js",
 	}
 
 	tempDir string
@@ -75,12 +75,12 @@ func main() {
 
 	// these have to be redefined now because of *prefix flag
 	// that is set after glob vars have been initialized.
-	for k, v := range prefixes{
+	for k, v := range prefixes {
 		prefixes[k] = path.Join(*prefix, v)
 	}
 	// TODO(mpl): sucks
 	prefixes["stored"] = prefixes["stored"] + "/"
-	
+
 	tpl = template.Must(template.New("main").Parse(mainHTML()))
 	tempDir = func() string {
 		if *dlDir == "" {
@@ -88,7 +88,7 @@ func main() {
 		}
 		return *dlDir
 	}()
-		
+
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Fatalf("Could not create temp dir %v: %v", tempDir, err)
 	}
@@ -99,10 +99,11 @@ func main() {
 	http.HandleFunc(prefixes["kill"], killHandler)
 	http.HandleFunc(prefixes["stored"], storedHandler)
 	http.HandleFunc(prefixes["progress"], progressHandler)
-	// TODO(mpl): embed instead
-	http.HandleFunc(prefixes["notify"], func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "/home/mpl/gocode/src/github.com/mpl/nodashtube/notify.js")
-	})
+	/*
+		http.HandleFunc(prefixes["notify"], func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, "/home/mpl/gocode/src/github.com/mpl/nodashtube/notify.js")
+		})
+	*/
 	http.HandleFunc(prefixes["main"], mainHandler)
 	if err := http.ListenAndServe(*host, nil); err != nil {
 		log.Fatalf("Could not start http server: %v", err)
@@ -309,7 +310,7 @@ type dlInfo struct {
 type progressWriter struct {
 	sync.RWMutex
 	lastLine string
-	buf bytes.Buffer
+	buf      bytes.Buffer
 }
 
 func (prw *progressWriter) Write(p []byte) (n int, err error) {
@@ -350,16 +351,78 @@ func isStored(name string) bool {
 	return false
 }
 
-// TODO(mpl): button to show .part
 func mainHTML() string {
 	return `<!DOCTYPE HTML>
 <html>
 	<head>
 		<title>NoDashTube</title>
-		<script src='notify.js'></script>
+<!--		<script src='notify.js'></script> -->
 	</head>
 
 	<body>
+	<script>
+var currentList = [];
+setInterval(function(){getProgressList("` + prefixes["progress"] + `")},5000);
+
+function notify(URL) {
+	if (!(window.webkitNotifications)) {
+		console.log("Notifications not supported");
+		return;
+	}
+	// TODO(mpl): probably should be tried once first on load or something?
+	var havePermission = window.webkitNotifications.checkPermission();
+	if (havePermission != 0) {
+		window.webkitNotifications.requestPermission();
+		return;
+	}
+	// 0 is PERMISSION_ALLOWED
+	// TODO(mpl): video title in text
+	// TODO(mpl): try without the icon
+	var notification = window.webkitNotifications.createNotification(
+		'http://i.stack.imgur.com/dmHl0.png',
+		'NoDashTube notification',
+		URL + ' is done.'
+	);
+
+	// TODO(mpl): open the stored vid
+	notification.onclick = function () {
+		window.open("http://` + path.Join(*host, *prefix) + `");
+		notification.close();
+	}
+	notification.show();
+} 
+
+function getProgressList(URL) {
+	var xmlhttp = new XMLHttpRequest();
+	xmlhttp.open("GET",URL,false);
+	xmlhttp.send();
+	console.log(xmlhttp.responseText);
+	var newListJSON = xmlhttp.response;
+	var newList = Object.keys(JSON.parse(newListJSON));
+	console.log(newList.length);
+	console.log(newList);
+	if (currentList.length == 0) {
+		currentList = newList;
+		return;
+	}
+	for (var i=0; i<currentList.length; i++) {
+		var youtubeURL = currentList[i];
+		var found = 0;
+		for (var j=0; j<newList.length; j++) {
+			if (youtubeURL === newList[j]) {
+				found = 1;
+				break;
+			}
+		}
+		if (found == 0) {
+			console.log(youtubeURL + " is done.")
+			notify(youtubeURL);
+		}
+	}
+	currentList = newList;
+}
+	</script>
+
 	<h2> Enter a youtube URL </h2>
 	<form action="` + prefixes["youtube"] + `" method="POST" id="youtubeform">
 	<input type="url" id="youtubeurl" name="` + urlInputName + `">
@@ -380,6 +443,7 @@ func mainHTML() string {
 			<input type="submit" id="killsubmit" value="Cancel">
 			</form>
 		</td>
+<!-- TODO(mpl): button/link to partial vid -->
 	</tr>
 	{{end}}
 	</table>
@@ -398,51 +462,3 @@ func mainHTML() string {
 </html>
 `
 }
-
-/*
-function notify() {
-  var havePermission = window.webkitNotifications.checkPermission();
-  if (havePermission == 0) {
-    // 0 is PERMISSION_ALLOWED
-    var notification = window.webkitNotifications.createNotification(
-      'http://i.stack.imgur.com/dmHl0.png',
-      'Chrome notification!',
-      'Here is the notification text'
-    );
-
-    notification.onclick = function () {
-      window.open("http://stackoverflow.com/a/13328397/1269037");
-      notification.close();
-    }
-    notification.show();
-  } else {
-      window.webkitNotifications.requestPermission();
-  }
-} 
-
-function getProgressList(URL) {
-	var xmlhttp = new XMLHttpRequest();
-	xmlhttp.open("GET",URL,false);
-	xmlhttp.send();
-	console.log(xmlhttp.responseText);
-	var newListJSON = xmlhttp.response;
-	var newList = Object.keys(JSON.parse(newListJSON));
-	console.log(newList.length);
-	console.log(newList);
-	if (currentList.length == 0) {
-		currentList = newList;
-		return;
-	}
-	for (var URL in currentList) {
-		if (!(URL in newList)) {
-			console.log(URL + " is done.")
-		}
-	}
-	currentList = newList;
-}
-
-var currentList = [];
-var progressHost = "http://localhost:8080/progress";
-setInterval(function(){getProgressList(progressHost)},5000);
-
-*/
