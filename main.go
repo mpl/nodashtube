@@ -39,6 +39,7 @@ func usage() {
 var (
 	urlInputName  = "youtubeURL"
 	killInputName = "toKill"
+	partialParam  = "partialFile"
 
 	prefixes = map[string]string{
 		"main":     "/",
@@ -47,6 +48,7 @@ var (
 		"stored":   "/stored/",
 		"progress": "/progress",
 		"notify":   "/notify.js",
+		"partial":  "/partial",
 	}
 
 	tempDir string
@@ -98,12 +100,13 @@ func main() {
 	http.HandleFunc(prefixes["youtube"], youtubeHandler)
 	http.HandleFunc(prefixes["kill"], killHandler)
 	http.HandleFunc(prefixes["stored"], storedHandler)
-	http.HandleFunc(prefixes["progress"], progressHandler)
+	http.HandleFunc(prefixes["progress"], listHandler)
 	/*
 		http.HandleFunc(prefixes["notify"], func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, "/home/mpl/gocode/src/github.com/mpl/nodashtube/notify.js")
 		})
 	*/
+	http.HandleFunc(prefixes["partial"], partialHandler)
 	http.HandleFunc(prefixes["main"], mainHandler)
 	if err := http.ListenAndServe(*host, nil); err != nil {
 		log.Fatalf("Could not start http server: %v", err)
@@ -159,11 +162,14 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		inProgressMu.Unlock()
 		log.Printf("%v done.", youtubeURL)
 	}()
-	inProgress[youtubeURL] = &dlInfo{
+	info := &dlInfo{
 		URL:      youtubeURL,
 		Progress: &out,
 		proc:     cmd.Process,
 	}
+	out.parent = info
+	info.Progress = &out
+	inProgress[youtubeURL] = info
 }
 
 func killHandler(w http.ResponseWriter, r *http.Request) {
@@ -205,7 +211,7 @@ func storedHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(tempDir, name))
 }
 
-func progressHandler(w http.ResponseWriter, r *http.Request) {
+func listHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Want GET", http.StatusMethodNotAllowed)
 		return
@@ -223,6 +229,26 @@ func progressHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(progressJSON)+1))
 	w.Write(progressJSON)
 	w.Write([]byte("\n"))
+}
+
+func partialHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Want GET", http.StatusMethodNotAllowed)
+		return
+	}
+	url := r.FormValue(partialParam)
+	if url == "" {
+		http.Error(w, fmt.Sprintf("request has no %v param", partialParam), http.StatusBadRequest)
+		return
+	}
+	inProgressMu.RLock()
+	defer inProgressMu.RUnlock()
+	info, ok := inProgress[url]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(tempDir, info.Filename+".part"))
 }
 
 func refresh(w http.ResponseWriter, r *http.Request) {
@@ -296,32 +322,47 @@ func sortedStored(f *os.File) ([]string, error) {
 	return onlyFull, nil
 }
 
-// TODO(mpl): this works well for the template, but not for the js because it doesn't
-// give progress. I don't actually need the progress for the js notifications though.
-// still it'd be nice to have a data struct which works directly for both without any
-// massageing needed.
 type dlInfo struct {
 	URL      string
+	Filename string
 	Progress *progressWriter
 	proc     *os.Process // so we can kill it
 }
 
-// TODO(mpl): this means reads will block youtube-dl if it blocks on writes. We'll see.
 type progressWriter struct {
-	sync.RWMutex
-	lastLine string
-	buf      bytes.Buffer
+	sync.RWMutex // only locks lastLine
+	lastLine     string
+
+	// no lock needed on these, as long as we don't do concurrent writes
+	buf          bytes.Buffer
+	filenameDone bool
+
+	parent *dlInfo // needs to be locked with inProgressMu
 }
 
+const destPattern = "[download] Destination:"
+
 func (prw *progressWriter) Write(p []byte) (n int, err error) {
-	prw.Lock()
-	defer prw.Unlock()
 	n, err = prw.buf.Write(p)
 	if err != nil {
 		return n, err
 	}
+
 	contents := prw.buf.String()
 	if len(contents) > 0 {
+		if !prw.filenameDone {
+			sidx := strings.Index(contents, destPattern)
+			if sidx != -1 && len(contents) > len(destPattern)+1 {
+				sidx = sidx + len(destPattern) + 1
+				if eidx := strings.Index(contents[sidx:], "\n"); eidx != -1 {
+					inProgressMu.Lock()
+					prw.parent.Filename = contents[sidx : sidx+eidx]
+					inProgressMu.Unlock()
+					prw.filenameDone = true
+				}
+			}
+			return n, err
+		}
 		cleanEnd := strings.LastIndex(contents, "\r")
 		if cleanEnd == -1 {
 			return n, err
@@ -330,7 +371,9 @@ func (prw *progressWriter) Write(p []byte) (n int, err error) {
 		if cleanStart == -1 {
 			cleanStart = 0
 		}
+		prw.Lock()
 		prw.lastLine = contents[cleanStart:cleanEnd]
+		prw.Unlock()
 		prw.buf.Read(make([]byte, cleanEnd+1))
 	}
 	return n, err
@@ -378,8 +421,9 @@ function notify(URL) {
 	// 0 is PERMISSION_ALLOWED
 	// TODO(mpl): video title in text
 	// TODO(mpl): try without the icon
+//		'http://i.stack.imgur.com/dmHl0.png',
 	var notification = window.webkitNotifications.createNotification(
-		'http://i.stack.imgur.com/dmHl0.png',
+		'',
 		'NoDashTube notification',
 		URL + ' is done.'
 	);
@@ -397,6 +441,7 @@ function getProgressList(URL) {
 	xmlhttp.open("GET",URL,false);
 	xmlhttp.send();
 	console.log(xmlhttp.responseText);
+// TODO(mpl): better error handling.
 	var newListJSON = xmlhttp.response;
 	var newList = Object.keys(JSON.parse(newListJSON));
 	console.log(newList.length);
@@ -434,16 +479,28 @@ function getProgressList(URL) {
 	{{range $dl := .InProgress}}
 	<tr>
 		<td>{{$dl.URL}}</td>
-	</tr>
-	<tr>
-		<td><pre>{{$dl.Progress}}</pre></td>
 		<td>
 			<form action="` + prefixes["kill"] + `" method="POST" id="killform">
 			<input type="hidden" id="killurl" name="` + killInputName + `" value="{{$dl.URL}}">
 			<input type="submit" id="killsubmit" value="Cancel">
 			</form>
 		</td>
-<!-- TODO(mpl): button/link to partial vid -->
+	</tr>
+	<tr>
+<!-- TODO(mpl): filename in the response? -->
+		<td><a href="` + prefixes["partial"] + `?` + partialParam + `={{urlquery $dl.URL}}">
+			{{if $dl.Filename}}{{$dl.Filename}}{{else}}{{$dl.URL}}{{end}}.part</a></td>
+	</tr>
+	<tr>
+		<td><pre>{{$dl.Progress}}</pre></td>
+<!--
+		<td>
+			<form action="` + prefixes["partial"] + `" method="GET" id="partialform">
+			<input type="hidden" id="partialurl" name="` + partialParam + `" value="{{$dl.URL}}">
+			<input type="submit" id="partialsubmit" value="Play">
+			</form>
+		</td>
+-->
 	</tr>
 	{{end}}
 	</table>
