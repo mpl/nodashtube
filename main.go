@@ -26,7 +26,7 @@ const (
 var (
 	dlDir  = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
 	help   = flag.Bool("h", false, "show this help.")
-	host   = flag.String("host", "0.0.0.0:8080", "listening port and hostname.")
+	host   = flag.String("host", "localhost:8080", "listening port and hostname.")
 	prefix = flag.String("prefix", "", "URL prefix for which the server runs (as in http://foo:8080/prefix).")
 )
 
@@ -42,13 +42,13 @@ var (
 	partialParam  = "partialFile"
 
 	prefixes = map[string]string{
-		"main":     "/",
-		"youtube":  "/youtube",
-		"kill":     "/kill",
-		"stored":   "/stored/",
-		"progress": "/progress",
-		"notify":   "/notify.js",
-		"partial":  "/partial",
+		"main":    "/",
+		"youtube": "/youtube",
+		"kill":    "/kill",
+		"stored":  "/stored/",
+		"list":    "/list",
+		"notify":  "/notify.js",
+		"partial": "/partial",
 	}
 
 	tempDir string
@@ -100,7 +100,7 @@ func main() {
 	http.HandleFunc(prefixes["youtube"], youtubeHandler)
 	http.HandleFunc(prefixes["kill"], killHandler)
 	http.HandleFunc(prefixes["stored"], storedHandler)
-	http.HandleFunc(prefixes["progress"], listHandler)
+	http.HandleFunc(prefixes["list"], listHandler)
 	/*
 		http.HandleFunc(prefixes["notify"], func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, "/home/mpl/gocode/src/github.com/mpl/nodashtube/notify.js")
@@ -404,10 +404,11 @@ func mainHTML() string {
 
 	<body>
 	<script>
-var currentList = [];
-setInterval(function(){getProgressList("` + prefixes["progress"] + `")},5000);
+var oldList = {};
+// TODO(mpl): set to 10 secs, or less, in prod.
+setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},5000);
 
-function notify(URL) {
+function notify(filename) {
 	if (!(window.webkitNotifications)) {
 		console.log("Notifications not supported");
 		return;
@@ -419,52 +420,50 @@ function notify(URL) {
 		return;
 	}
 	// 0 is PERMISSION_ALLOWED
-	// TODO(mpl): video title in text
-	// TODO(mpl): try without the icon
-//		'http://i.stack.imgur.com/dmHl0.png',
 	var notification = window.webkitNotifications.createNotification(
 		'',
 		'NoDashTube notification',
-		URL + ' is done.'
+		filename + ' is done.'
 	);
 
-	// TODO(mpl): open the stored vid
 	notification.onclick = function () {
-		window.open("http://` + path.Join(*host, *prefix) + `");
+		// TODO(mpl): needs a fucking reload. wtf. could it be the changed since?
+		window.open("http://` + *host + prefixes["stored"] + `" + escape(filename));
 		notification.close();
 	}
 	notification.show();
 } 
 
-function getProgressList(URL) {
+function getDownloadsList(url) {
 	var xmlhttp = new XMLHttpRequest();
-	xmlhttp.open("GET",URL,false);
+	xmlhttp.open("GET",url,false);
 	xmlhttp.send();
 	console.log(xmlhttp.responseText);
 // TODO(mpl): better error handling.
 	var newListJSON = xmlhttp.response;
-	var newList = Object.keys(JSON.parse(newListJSON));
-	console.log(newList.length);
-	console.log(newList);
-	if (currentList.length == 0) {
-		currentList = newList;
+	var newList = JSON.parse(newListJSON);
+	var newKeys = Object.keys(newList);
+	var oldKeys = Object.keys(oldList);
+	console.log(newKeys);
+	if (oldKeys.length == 0) {
+		oldList = newList;
 		return;
 	}
-	for (var i=0; i<currentList.length; i++) {
-		var youtubeURL = currentList[i];
+	for (var i=0; i<oldKeys.length; i++) {
 		var found = 0;
-		for (var j=0; j<newList.length; j++) {
-			if (youtubeURL === newList[j]) {
+		for (var j=0; j<newKeys.length; j++) {
+			if (oldKeys[i] === newKeys[j]) {
 				found = 1;
 				break;
 			}
 		}
 		if (found == 0) {
-			console.log(youtubeURL + " is done.")
-			notify(youtubeURL);
+			var newlyStored = oldList[oldKeys[i]].Filename;
+			console.log(newlyStored + " is done.")
+			notify(newlyStored);
 		}
 	}
-	currentList = newList;
+	oldList = newList;
 }
 	</script>
 
