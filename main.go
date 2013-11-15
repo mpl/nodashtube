@@ -31,9 +31,17 @@ var (
 )
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "\t nodashtube \n")
+	fmt.Fprintf(os.Stderr, "nodashtube \n")
 	flag.PrintDefaults()
+	fmt.Fprintf(os.Stderr, "%v\n", examples())
 	os.Exit(2)
+}
+
+func examples() string {
+	return `
+Examples:
+	nodashtube -dldir $HOME/Downloads/nodashtube -prefix nodashtube
+`
 }
 
 var (
@@ -47,7 +55,6 @@ var (
 		"kill":    "/kill",
 		"stored":  "/stored/",
 		"list":    "/list",
-		"notify":  "/notify.js",
 		"partial": "/partial",
 	}
 
@@ -75,12 +82,16 @@ func main() {
 		usage()
 	}
 
+	if *prefix != "" && (*prefix)[0] != '/' {
+		*prefix = "/" + *prefix
+	}
 	// these have to be redefined now because of *prefix flag
 	// that is set after glob vars have been initialized.
 	for k, v := range prefixes {
 		prefixes[k] = path.Join(*prefix, v)
 	}
-	// TODO(mpl): sucks
+	// TODO(mpl): do a check before the prefix joining to find out which
+	// ones need to have a trailing "/" readded afterwards.
 	prefixes["stored"] = prefixes["stored"] + "/"
 
 	tpl = template.Must(template.New("main").Parse(mainHTML()))
@@ -101,11 +112,6 @@ func main() {
 	http.HandleFunc(prefixes["kill"], killHandler)
 	http.HandleFunc(prefixes["stored"], storedHandler)
 	http.HandleFunc(prefixes["list"], listHandler)
-	/*
-		http.HandleFunc(prefixes["notify"], func(w http.ResponseWriter, r *http.Request) {
-			http.ServeFile(w, r, "/home/mpl/gocode/src/github.com/mpl/nodashtube/notify.js")
-		})
-	*/
 	http.HandleFunc(prefixes["partial"], partialHandler)
 	http.HandleFunc(prefixes["main"], mainHandler)
 	if err := http.ListenAndServe(*host, nil); err != nil {
@@ -115,7 +121,6 @@ func main() {
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != prefixes["main"] {
-		println(r.URL.Path + " != " + prefixes["main"])
 		http.NotFound(w, r)
 		return
 	}
@@ -158,8 +163,11 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		inProgressMu.Lock()
+		defer inProgressMu.Unlock()
+		storedMu.Lock()
+		defer storedMu.Unlock()
+		refreshStored(time.Time{})
 		delete(inProgress, youtubeURL)
-		inProgressMu.Unlock()
 		log.Printf("%v done.", youtubeURL)
 	}()
 	info := &dlInfo{
@@ -399,14 +407,12 @@ func mainHTML() string {
 <html>
 	<head>
 		<title>NoDashTube</title>
-<!--		<script src='notify.js'></script> -->
 	</head>
 
 	<body>
 	<script>
 var oldList = {};
-// TODO(mpl): set to 10 secs, or less, in prod.
-setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},5000);
+setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},7000);
 
 function notify(filename) {
 	if (!(window.webkitNotifications)) {
@@ -427,8 +433,7 @@ function notify(filename) {
 	);
 
 	notification.onclick = function () {
-		// TODO(mpl): needs a fucking reload. wtf. could it be the changed since?
-		window.open("http://` + *host + prefixes["stored"] + `" + escape(filename));
+		window.open("http://` + *host + prefixes["stored"] + `" + encodeURIComponent(filename));
 		notification.close();
 	}
 	notification.show();
@@ -492,14 +497,6 @@ function getDownloadsList(url) {
 	</tr>
 	<tr>
 		<td><pre>{{$dl.Progress}}</pre></td>
-<!--
-		<td>
-			<form action="` + prefixes["partial"] + `" method="GET" id="partialform">
-			<input type="hidden" id="partialurl" name="` + partialParam + `" value="{{$dl.URL}}">
-			<input type="submit" id="partialsubmit" value="Play">
-			</form>
-		</td>
--->
 	</tr>
 	{{end}}
 	</table>
