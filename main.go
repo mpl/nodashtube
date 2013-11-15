@@ -147,6 +147,7 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO(mpl): help with installing youtube-dl
 	cmd := exec.Command("youtube-dl", youtubeURL)
 	out := progressWriter{}
 	cmd.Stdout = &out
@@ -465,6 +466,7 @@ function getDownloadsList(url) {
 		if (found == 0) {
 			var newlyStored = oldList[oldKeys[i]].Filename;
 			console.log(newlyStored + " is done.")
+// TODO(mpl): notifications don't seem to work remotely?
 			notify(newlyStored);
 		}
 	}
