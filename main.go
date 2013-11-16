@@ -415,18 +415,29 @@ func mainHTML() string {
 var oldList = {};
 setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},7000);
 
+function enableNotify() {
+	if (!(window.webkitNotifications)) {
+		alert("Notifications not supported on this browser.");
+		return;
+	}
+	var havePermission = window.webkitNotifications.checkPermission();
+	if (havePermission == 0) {
+		console.log("Notifications already allowed.");
+		return;
+	}
+	window.webkitNotifications.requestPermission();
+}
+
 function notify(filename) {
 	if (!(window.webkitNotifications)) {
 		console.log("Notifications not supported");
 		return;
 	}
-	// TODO(mpl): probably should be tried once first on load or something?
 	var havePermission = window.webkitNotifications.checkPermission();
 	if (havePermission != 0) {
-		window.webkitNotifications.requestPermission();
+		console.log("Notifications not allowed.");
 		return;
 	}
-	// 0 is PERMISSION_ALLOWED
 	var notification = window.webkitNotifications.createNotification(
 		'',
 		'NoDashTube notification',
@@ -466,13 +477,14 @@ function getDownloadsList(url) {
 		if (found == 0) {
 			var newlyStored = oldList[oldKeys[i]].Filename;
 			console.log(newlyStored + " is done.")
-// TODO(mpl): notifications don't seem to work remotely?
 			notify(newlyStored);
 		}
 	}
 	oldList = newList;
 }
 	</script>
+
+	<a id="notifyLink" href="#" onclick="enableNotify();return false;">Enable notifications?</a>
 
 	<h2> Enter a youtube URL </h2>
 	<form action="` + prefixes["youtube"] + `" method="POST" id="youtubeform">
