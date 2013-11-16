@@ -200,6 +200,7 @@ func killHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := dl.proc.Kill(); err != nil {
 		log.Printf("Could not kill %v: %v", toKill, err)
+		// TODO(mpl): we should probably still try and remove it from inProgress.
 		return
 	}
 	delete(inProgress, toKill)
@@ -413,6 +414,8 @@ func mainHTML() string {
 	<body>
 	<script>
 var oldList = {};
+// TODO(mpl): we won't get a notification if we get the vid faster than
+// the interval here allowed us to notice there was a download in progress.
 setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},7000);
 
 function enableNotify() {
