@@ -88,11 +88,15 @@ func main() {
 	// these have to be redefined now because of *prefix flag
 	// that is set after glob vars have been initialized.
 	for k, v := range prefixes {
+		trailingSlash := false
+		if prefixes[k][len(prefixes[k])-1] == '/' {
+			trailingSlash = true
+		}
 		prefixes[k] = path.Join(*prefix, v)
+		if trailingSlash {
+			prefixes[k] = prefixes[k] + "/"
+		}
 	}
-	// TODO(mpl): do a check before the prefix joining to find out which
-	// ones need to have a trailing "/" readded afterwards.
-	prefixes["stored"] = prefixes["stored"] + "/"
 
 	tpl = template.Must(template.New("main").Parse(mainHTML()))
 	tempDir = func() string {
@@ -200,8 +204,6 @@ func killHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := dl.proc.Kill(); err != nil {
 		log.Printf("Could not kill %v: %v", toKill, err)
-		// TODO(mpl): we should probably still try and remove it from inProgress.
-		return
 	}
 	delete(inProgress, toKill)
 }
@@ -414,9 +416,8 @@ func mainHTML() string {
 	<body>
 	<script>
 var oldList = {};
-// TODO(mpl): we won't get a notification if we get the vid faster than
-// the interval here allowed us to notice there was a download in progress.
 setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},7000);
+window.onload=function(){getDownloadsList("` + prefixes["list"] + `")};
 
 function enableNotify() {
 	if (!(window.webkitNotifications)) {
@@ -425,7 +426,7 @@ function enableNotify() {
 	}
 	var havePermission = window.webkitNotifications.checkPermission();
 	if (havePermission == 0) {
-		console.log("Notifications already allowed.");
+		alert("Notifications already allowed.");
 		return;
 	}
 	window.webkitNotifications.requestPermission();
