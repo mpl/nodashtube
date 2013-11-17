@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -213,7 +214,11 @@ func storedHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Want GET", http.StatusMethodNotAllowed)
 		return
 	}
-	name := strings.TrimPrefix(r.URL.Path, prefixes["stored"])
+	name, err := url.QueryUnescape(strings.TrimPrefix(r.URL.Path, prefixes["stored"]))
+	if err != nil {
+		http.Error(w, "Error unescaping requested filename", http.StatusInternalServerError)
+		return
+	}
 	storedMu.RLock()
 	defer storedMu.RUnlock()
 	if !isStored(name) {
@@ -524,7 +529,7 @@ function getDownloadsList(url) {
 	<table>
 	{{range $st := .Stored}}
 	<tr>
-		<td><a href="` + prefixes["stored"] + `{{$st}}">{{$st}}</a></td>
+		<td><a href="` + prefixes["stored"] + `{{urlquery $st}}">{{$st}}</a></td>
 	</tr>
 	{{end}}
 	</table>
