@@ -170,6 +170,7 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Starting download of %v", youtubeURL)
 	go func() {
 		if err := cmd.Wait(); err != nil {
+			// TODO(mpl): capture and print youtube-dl's process stderr here
 			log.Printf("youtube-dl %v didn't finish successfully: %v", youtubeURL, err)
 			inProgressMu.Lock()
 			defer inProgressMu.Unlock()
