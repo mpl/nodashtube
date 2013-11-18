@@ -57,12 +57,16 @@ var (
 		"stored":  "/stored/",
 		"list":    "/list",
 		"partial": "/partial",
+		"done":    "/done",
 	}
 
 	tempDir string
 
 	inProgressMu sync.RWMutex
 	inProgress   = make(map[string]*dlInfo)
+
+	doneMu sync.RWMutex
+	done   = make(map[string]string) // map URL to filename, for javascript.
 
 	storedMu sync.RWMutex
 	stored   []string
@@ -116,6 +120,7 @@ func main() {
 	http.HandleFunc(prefixes["youtube"], youtubeHandler)
 	http.HandleFunc(prefixes["kill"], killHandler)
 	http.HandleFunc(prefixes["stored"], storedHandler)
+	http.HandleFunc(prefixes["done"], doneHandler)
 	http.HandleFunc(prefixes["list"], listHandler)
 	http.HandleFunc(prefixes["partial"], partialHandler)
 	http.HandleFunc(prefixes["main"], mainHandler)
@@ -166,6 +171,9 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("youtube-dl %v didn't finish successfully: %v", youtubeURL, err)
+			inProgressMu.Lock()
+			defer inProgressMu.Unlock()
+			delete(inProgress, youtubeURL)
 			return
 		}
 		inProgressMu.Lock()
@@ -173,6 +181,11 @@ func youtubeHandler(w http.ResponseWriter, r *http.Request) {
 		storedMu.Lock()
 		defer storedMu.Unlock()
 		refreshStored(time.Time{})
+		// TODO(mpl): prune done after some time or some event?
+		// Like maybe after stored[filename] has been hit at least once?
+		doneMu.Lock()
+		defer doneMu.Unlock()
+		done[youtubeURL] = inProgress[youtubeURL].Filename
 		delete(inProgress, youtubeURL)
 		log.Printf("%v done.", youtubeURL)
 	}()
@@ -245,6 +258,37 @@ func listHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Length", strconv.Itoa(len(progressJSON)+1))
 	w.Write(progressJSON)
+	w.Write([]byte("\n"))
+}
+
+func doneHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Want GET", http.StatusMethodNotAllowed)
+		return
+	}
+
+	url := r.FormValue("url")
+	if url == "" {
+		http.Error(w, fmt.Sprintf("request has no \"url\" param"), http.StatusBadRequest)
+		return
+	}
+	doneMu.RLock()
+	defer doneMu.RUnlock()
+	filename, ok := done[url]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	doneJSON, err := json.Marshal(struct{ Filename string }{Filename: filename})
+	if err != nil {
+		// TODO(mpl): json error
+		http.Error(w, "Error encoding done", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/javascript")
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Length", strconv.Itoa(len(doneJSON)+1))
+	w.Write(doneJSON)
 	w.Write([]byte("\n"))
 }
 
@@ -460,6 +504,20 @@ function notify(filename) {
 	notification.show();
 } 
 
+function getFilename(url) {
+	var xmlhttp = new XMLHttpRequest();
+	xmlhttp.open("GET",url,false);
+	xmlhttp.send();
+	console.log(xmlhttp.responseText);
+// TODO(mpl): better error handling.
+	var filenameJSON = xmlhttp.response;
+	var filenameObj = JSON.parse(filenameJSON);
+	if (!(filenameObj.Filename)) {
+		return "";
+	}
+	return filenameObj.Filename;
+}
+
 function getDownloadsList(url) {
 	var xmlhttp = new XMLHttpRequest();
 	xmlhttp.open("GET",url,false);
@@ -484,7 +542,11 @@ function getDownloadsList(url) {
 			}
 		}
 		if (found == 0) {
-			var newlyStored = oldList[oldKeys[i]].Filename;
+			console.log(oldKeys[i] + " is done.");
+			var newlyStored = getFilename("` + prefixes["done"] + `?url=" + oldKeys[i]);
+			if (newlyStored == "") {
+				return;
+			}
 			console.log(newlyStored + " is done.")
 			notify(newlyStored);
 		}
