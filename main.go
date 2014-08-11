@@ -28,6 +28,7 @@ var (
 	dlDir  = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
 	help   = flag.Bool("h", false, "show this help.")
 	host   = flag.String("host", "localhost:8080", "listening port and hostname.")
+	// TODO(mpl): redirect loop bug when no prefix
 	prefix = flag.String("prefix", "", "URL prefix for which the server runs (as in http://foo:8080/prefix).")
 )
 
@@ -470,39 +471,48 @@ setInterval(function(){getDownloadsList("` + prefixes["list"] + `")},7000);
 window.onload=function(){getDownloadsList("` + prefixes["list"] + `")};
 
 function enableNotify() {
-	if (!(window.webkitNotifications)) {
+	if (!("Notification" in window)) {
 		alert("Notifications not supported on this browser.");
 		return;
 	}
-	var havePermission = window.webkitNotifications.checkPermission();
-	if (havePermission == 0) {
+	if (Notification.permission === "granted") {
 		alert("Notifications already allowed.");
 		return;
+	} else if (Notification.permission !== 'denied') {
+		Notification.requestPermission(function (permission) {
+			// Whatever the user answers, we make sure we store the information
+			if(!('permission' in Notification)) {
+				Notification.permission = permission;
+			}
+
+		});
 	}
-	window.webkitNotifications.requestPermission();
 }
 
 function notify(filename) {
-	if (!(window.webkitNotifications)) {
-		console.log("Notifications not supported");
+	if (!("Notification" in window)) {
+		console.log("Notifications not supported on this browser.");
 		return;
 	}
-	var havePermission = window.webkitNotifications.checkPermission();
-	if (havePermission != 0) {
+	if (Notification.permission !== 'granted') {
 		console.log("Notifications not allowed.");
 		return;
 	}
-	var notification = window.webkitNotifications.createNotification(
-		'',
+
+	var notification = new Notification(
 		'NoDashTube notification',
-		filename + ' is done.'
+		{
+			body: filename + ' is done.'
+		}
 	);
 
 	notification.onclick = function () {
 		window.open("http://` + *host + prefixes["stored"] + `" + encodeURIComponent(filename));
 		notification.close();
 	}
-	notification.show();
+	notification.onshow = function() {
+		// do nothing. to prevent automatic behaviour that closes it.
+	}
 } 
 
 function getFilename(url) {
