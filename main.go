@@ -25,11 +25,11 @@ const (
 )
 
 var (
-	dlDir  = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
-	help   = flag.Bool("h", false, "show this help.")
-	host   = flag.String("host", "localhost:8080", "listening port and hostname.")
+	dlDir = flag.String("dldir", "", "where to write the downloads. defaults to /tmp/nodashtube.")
+	help  = flag.Bool("h", false, "show this help.")
+	host  = flag.String("host", "localhost:8080", "listening port and hostname.")
 	// TODO(mpl): redirect loop bug when no prefix
-	prefix = flag.String("prefix", "", "URL prefix for which the server runs (as in http://foo:8080/prefix).")
+	prefix = flag.String("prefix", "/", "URL prefix for which the server runs (as in http://foo:8080/prefix).")
 )
 
 func usage() {
@@ -93,14 +93,16 @@ func main() {
 	}
 	// these have to be redefined now because of *prefix flag
 	// that is set after glob vars have been initialized.
-	for k, v := range prefixes {
-		trailingSlash := false
-		if prefixes[k][len(prefixes[k])-1] == '/' {
-			trailingSlash = true
-		}
-		prefixes[k] = path.Join(*prefix, v)
-		if trailingSlash {
-			prefixes[k] = prefixes[k] + "/"
+	if *prefix != "/" {
+		for k, v := range prefixes {
+			trailingSlash := false
+			if prefixes[k][len(prefixes[k])-1] == '/' {
+				trailingSlash = true
+			}
+			prefixes[k] = path.Join(*prefix, v)
+			if trailingSlash {
+				prefixes[k] = prefixes[k] + "/"
+			}
 		}
 	}
 
@@ -315,6 +317,7 @@ func partialHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func refresh(w http.ResponseWriter, r *http.Request) {
+	println("refresh")
 	w.Header().Set("Server", idstring)
 	ifMod, err := time.Parse(http.TimeFormat, r.Header.Get("If-Modified-Since"))
 	if err != nil {
